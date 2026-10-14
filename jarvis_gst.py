@@ -49,7 +49,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --------------------------
-# Helper Functions & Advanced Cleaning
+# Helper Functions
 # --------------------------
 
 def clean_gstin(val):
@@ -115,7 +115,6 @@ def reconcile(pr_df, gstr_df, amount_tolerance=2.0, fuzzy_threshold=88):
     pr = pr_df.copy()
     gstr = gstr_df.copy()
     
-    # Level 1: Exact Match
     pr['key'] = pr.apply(lambda r: create_match_key(r['gstin'], r['invoice_no']), axis=1)
     gstr['key'] = gstr.apply(lambda r: create_match_key(r['gstin'], r['invoice_no']), axis=1)
     
@@ -126,7 +125,6 @@ def reconcile(pr_df, gstr_df, amount_tolerance=2.0, fuzzy_threshold=88):
     remaining_pr = pr[\~pr['key'].isin(exact_matched_keys)].copy()
     remaining_gstr = gstr[\~gstr['key'].isin(exact_matched_keys)].copy()
     
-    # Level 2: Fuzzy Match
     fuzzy_matches = []
     for gstin, pr_group in remaining_pr.groupby('gstin'):
         gstr_group = remaining_gstr[remaining_gstr['gstin'] == gstin]
@@ -155,10 +153,9 @@ def reconcile(pr_df, gstr_df, amount_tolerance=2.0, fuzzy_threshold=88):
     for _, gstr_idx, _, _ in fuzzy_matches:
         matched_gstr_idxs.add(gstr_idx)
 
-    remaining_pr = pr[\~pr['key'].isin(exact_matched_keys)].copy()
+    remaining_pr = pr[\~pr.index.isin(matched_pr_idxs)].copy()
     remaining_gstr = gstr[\~gstr.index.isin(matched_gstr_idxs)].copy()
 
-    # Level 3: Near / Partial Match
     near_matches = []
     for pr_idx, pr_row in remaining_pr.iterrows():
         gstr_subset = remaining_gstr[remaining_gstr['gstin'] == pr_row['gstin']]
@@ -181,7 +178,6 @@ def reconcile(pr_df, gstr_df, amount_tolerance=2.0, fuzzy_threshold=88):
 
     matched_rows = []
     
-    # Exact matches → Fully Matched or Value Mismatch
     for key in exact_matched_keys:
         pr_row = pr[pr['key'] == key].iloc[0]
         gstr_row = gstr[gstr['key'] == key].iloc[0]
@@ -208,7 +204,6 @@ def reconcile(pr_df, gstr_df, amount_tolerance=2.0, fuzzy_threshold=88):
             'Fuzzy Score': 100
         })
     
-    # Fuzzy matches → Fully Matched (Fuzzy) or Value Mismatch
     for pr_idx, gstr_idx, score, m_type in fuzzy_matches:
         pr_row = pr.loc[pr_idx]
         gstr_row = gstr.loc[gstr_idx]
@@ -235,7 +230,6 @@ def reconcile(pr_df, gstr_df, amount_tolerance=2.0, fuzzy_threshold=88):
             'Fuzzy Score': score
         })
 
-    # Near matches → Fully Matched (Fuzzy)
     for pr_idx, gstr_idx in near_matches:
         pr_row = pr.loc[pr_idx]
         gstr_row = gstr.loc[gstr_idx]
@@ -664,7 +658,6 @@ with tab1:
             st.subheader("📊 Advanced Reconciliation Summary")
             
             partywise_df = create_partywise_summary(pr_norm, gstr_norm, amount_tol)
-            fully_parties = len(partywise_df[partywise_df['Status'] == 'Fully Matched'])
             
             fully_count = len(matched[matched['Status'] == 'Fully Matched']) if not matched.empty else 0
             fuzzy_count = len(matched[matched['Status'] == 'Fully Matched (Fuzzy)']) if not matched.empty else 0
