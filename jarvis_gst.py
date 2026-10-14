@@ -153,8 +153,8 @@ def reconcile(pr_df, gstr_df, amount_tolerance=2.0, fuzzy_threshold=88):
     for _, gstr_idx, _, _ in fuzzy_matches:
         matched_gstr_idxs.add(gstr_idx)
 
-    remaining_pr = pr[\~pr.index.isin(matched_pr_idxs)].copy()
-    remaining_gstr = gstr[\~gstr.index.isin(matched_gstr_idxs)].copy()
+    remaining_pr = pr[~pr.index.isin(matched_pr_idxs)].copy()
+    remaining_gstr = gstr[~gstr.index.isin(matched_gstr_idxs)].copy()
 
     near_matches = []
     for pr_idx, pr_row in remaining_pr.iterrows():
