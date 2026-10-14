@@ -3,8 +3,7 @@ Jarvis GST Reconciliation Platform (Partywise Detailed Tax Edition)
 --------------------------------------------------
 Full local ownership. Runs entirely on your computer.
 Purchase Register vs GSTR-2B matching for B2B invoices.
-Features: 3-Level Matching (Fully Matched / Fully Matched Fuzzy / Value Mismatch), 
-Advanced Cleaning, Partywise Summary with Separate IGST/CGST/SGST & Yellow Highlighting.
+Features: 3-Level Matching, Advanced Cleaning, Partywise Summary with Separate IGST/CGST/SGST & Yellow Highlighting.
 """
 
 import streamlit as st
@@ -49,7 +48,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --------------------------
-# Helper Functions
+# Helper Functions & Advanced Cleaning
 # --------------------------
 
 def clean_gstin(val):
@@ -115,6 +114,7 @@ def reconcile(pr_df, gstr_df, amount_tolerance=2.0, fuzzy_threshold=88):
     pr = pr_df.copy()
     gstr = gstr_df.copy()
     
+    # Level 1: Exact Match
     pr['key'] = pr.apply(lambda r: create_match_key(r['gstin'], r['invoice_no']), axis=1)
     gstr['key'] = gstr.apply(lambda r: create_match_key(r['gstin'], r['invoice_no']), axis=1)
     
@@ -125,6 +125,7 @@ def reconcile(pr_df, gstr_df, amount_tolerance=2.0, fuzzy_threshold=88):
     remaining_pr = pr[~pr['key'].isin(exact_matched_keys)].copy()
     remaining_gstr = gstr[~gstr['key'].isin(exact_matched_keys)].copy()
     
+    # Level 2: Fuzzy Match
     fuzzy_matches = []
     for gstin, pr_group in remaining_pr.groupby('gstin'):
         gstr_group = remaining_gstr[remaining_gstr['gstin'] == gstin]
@@ -156,6 +157,7 @@ def reconcile(pr_df, gstr_df, amount_tolerance=2.0, fuzzy_threshold=88):
     remaining_pr = pr[~pr.index.isin(matched_pr_idxs)].copy()
     remaining_gstr = gstr[~gstr.index.isin(matched_gstr_idxs)].copy()
 
+    # Level 3: Near / Partial Match (Invoice No Mismatch case where GSTIN + Taxable + Tax match)
     near_matches = []
     for pr_idx, pr_row in remaining_pr.iterrows():
         gstr_subset = remaining_gstr[remaining_gstr['gstin'] == pr_row['gstin']]
@@ -183,25 +185,16 @@ def reconcile(pr_df, gstr_df, amount_tolerance=2.0, fuzzy_threshold=88):
         gstr_row = gstr[gstr['key'] == key].iloc[0]
         tax_diff = abs(pr_row['total_tax'] - gstr_row['total_tax'])
         taxable_diff = abs(pr_row['taxable'] - gstr_row['taxable'])
-        
         status = "Fully Matched" if (tax_diff <= amount_tolerance and taxable_diff <= amount_tolerance) else "Value Mismatch"
         
         matched_rows.append({
-            'Status': status,
-            'Match Type': 'Exact',
-            'GSTIN': pr_row['gstin'],
-            'Invoice No (Books)': pr_row['invoice_no_raw'],
-            'Invoice No (2B)': gstr_row['invoice_no_raw'],
-            'Taxable (Books)': pr_row['taxable'],
-            'Taxable (2B)': gstr_row['taxable'],
+            'Status': status, 'Match Type': 'Exact', 'GSTIN': pr_row['gstin'],
+            'Invoice No (Books)': pr_row['invoice_no_raw'], 'Invoice No (2B)': gstr_row['invoice_no_raw'],
+            'Taxable (Books)': pr_row['taxable'], 'Taxable (2B)': gstr_row['taxable'],
             'Tax Diff': round(pr_row['total_tax'] - gstr_row['total_tax'], 2),
-            'IGST (Books)': pr_row['igst'],
-            'IGST (2B)': gstr_row['igst'],
-            'CGST (Books)': pr_row['cgst'],
-            'CGST (2B)': gstr_row['cgst'],
-            'SGST (Books)': pr_row['sgst'],
-            'SGST (2B)': gstr_row['sgst'],
-            'Fuzzy Score': 100
+            'IGST (Books)': pr_row['igst'], 'IGST (2B)': gstr_row['igst'],
+            'CGST (Books)': pr_row['cgst'], 'CGST (2B)': gstr_row['cgst'],
+            'SGST (Books)': pr_row['sgst'], 'SGST (2B)': gstr_row['sgst'], 'Fuzzy Score': 100
         })
     
     for pr_idx, gstr_idx, score, m_type in fuzzy_matches:
@@ -209,47 +202,29 @@ def reconcile(pr_df, gstr_df, amount_tolerance=2.0, fuzzy_threshold=88):
         gstr_row = gstr.loc[gstr_idx]
         tax_diff = abs(pr_row['total_tax'] - gstr_row['total_tax'])
         taxable_diff = abs(pr_row['taxable'] - gstr_row['taxable'])
-        
-        status = "Fully Matched (Fuzzy)" if (tax_diff <= amount_tolerance and taxable_diff <= amount_tolerance) else "Value Mismatch"
+        status = "Fully Matched (Fuzzy)" if (tax_diff <= amount_tolerance and taxable_diff <= amount_tolerance) else "Value Mismatch (Fuzzy)"
         
         matched_rows.append({
-            'Status': status,
-            'Match Type': 'Fuzzy',
-            'GSTIN': pr_row['gstin'],
-            'Invoice No (Books)': pr_row['invoice_no_raw'],
-            'Invoice No (2B)': gstr_row['invoice_no_raw'],
-            'Taxable (Books)': pr_row['taxable'],
-            'Taxable (2B)': gstr_row['taxable'],
+            'Status': status, 'Match Type': m_type, 'GSTIN': pr_row['gstin'],
+            'Invoice No (Books)': pr_row['invoice_no_raw'], 'Invoice No (2B)': gstr_row['invoice_no_raw'],
+            'Taxable (Books)': pr_row['taxable'], 'Taxable (2B)': gstr_row['taxable'],
             'Tax Diff': round(pr_row['total_tax'] - gstr_row['total_tax'], 2),
-            'IGST (Books)': pr_row['igst'],
-            'IGST (2B)': gstr_row['igst'],
-            'CGST (Books)': pr_row['cgst'],
-            'CGST (2B)': gstr_row['cgst'],
-            'SGST (Books)': pr_row['sgst'],
-            'SGST (2B)': gstr_row['sgst'],
-            'Fuzzy Score': score
+            'IGST (Books)': pr_row['igst'], 'IGST (2B)': gstr_row['igst'],
+            'CGST (Books)': pr_row['cgst'], 'CGST (2B)': gstr_row['cgst'],
+            'SGST (Books)': pr_row['sgst'], 'SGST (2B)': gstr_row['sgst'], 'Fuzzy Score': score
         })
 
     for pr_idx, gstr_idx in near_matches:
         pr_row = pr.loc[pr_idx]
         gstr_row = gstr.loc[gstr_idx]
-        
         matched_rows.append({
-            'Status': 'Fully Matched (Fuzzy)',
-            'Match Type': 'Near Match',
-            'GSTIN': pr_row['gstin'],
-            'Invoice No (Books)': pr_row['invoice_no_raw'],
-            'Invoice No (2B)': gstr_row['invoice_no_raw'],
-            'Taxable (Books)': pr_row['taxable'],
-            'Taxable (2B)': gstr_row['taxable'],
+            'Status': 'Matched (Invoice No needs correction)', 'Match Type': 'Near Match', 'GSTIN': pr_row['gstin'],
+            'Invoice No (Books)': pr_row['invoice_no_raw'], 'Invoice No (2B)': gstr_row['invoice_no_raw'],
+            'Taxable (Books)': pr_row['taxable'], 'Taxable (2B)': gstr_row['taxable'],
             'Tax Diff': round(pr_row['total_tax'] - gstr_row['total_tax'], 2),
-            'IGST (Books)': pr_row['igst'],
-            'IGST (2B)': gstr_row['igst'],
-            'CGST (Books)': pr_row['cgst'],
-            'CGST (2B)': gstr_row['cgst'],
-            'SGST (Books)': pr_row['sgst'],
-            'SGST (2B)': gstr_row['sgst'],
-            'Fuzzy Score': 95
+            'IGST (Books)': pr_row['igst'], 'IGST (2B)': gstr_row['igst'],
+            'CGST (Books)': pr_row['cgst'], 'CGST (2B)': gstr_row['cgst'],
+            'SGST (Books)': pr_row['sgst'], 'SGST (2B)': gstr_row['sgst'], 'Fuzzy Score': 95
         })
     
     matched_df = pd.DataFrame(matched_rows)
@@ -262,11 +237,11 @@ def reconcile(pr_df, gstr_df, amount_tolerance=2.0, fuzzy_threshold=88):
     for pr_idx, _ in near_matches:
         matched_pr_orig.add(pr_idx)
     
-    missing_in_2b = pr[\~pr.index.isin(matched_pr_orig)].copy()
+    missing_in_2b = pr[~pr.index.isin(matched_pr_orig)].copy()
     missing_in_2b = missing_in_2b[['gstin', 'invoice_no_raw', 'taxable', 'igst', 'cgst', 'sgst', 'total_tax']]
     missing_in_2b.columns = ['GSTIN', 'Invoice No', 'Taxable', 'IGST', 'CGST', 'SGST', 'Total Tax']
     
-    extra_in_2b = gstr[\~gstr.index.isin(matched_gstr_idxs)].copy()
+    extra_in_2b = gstr[~gstr.index.isin(matched_gstr_idxs)].copy()
     extra_in_2b = extra_in_2b[['gstin', 'invoice_no_raw', 'taxable', 'igst', 'cgst', 'sgst', 'total_tax']]
     extra_in_2b.columns = ['GSTIN', 'Invoice No', 'Taxable', 'IGST', 'CGST', 'SGST', 'Total Tax']
     
@@ -352,13 +327,13 @@ def to_excel_download(matched, missing, extra, pr_norm, gstr_norm, amount_tolera
     output = BytesIO()
     
     if not matched.empty:
-        fully = matched[matched['Status'] == 'Fully Matched'].copy()
-        fuzzy = matched[matched['Status'] == 'Fully Matched (Fuzzy)'].copy()
-        mismatch = matched[matched['Status'] == 'Value Mismatch'].copy()
+        fully = matched[matched['Status'].str.contains('Fully Matched', na=False)].copy()
+        near_match = matched[matched['Status'].str.contains('needs correction', na=False)].copy()
+        mismatch = matched[matched['Status'].str.contains('Mismatch', na=False)].copy()
         mismatch = enrich_mismatch(mismatch)
     else:
         fully = pd.DataFrame()
-        fuzzy = pd.DataFrame()
+        near_match = pd.DataFrame()
         mismatch = pd.DataFrame()
         
     partywise_df = create_partywise_summary(pr_norm, gstr_norm, amount_tolerance)
@@ -429,7 +404,7 @@ def to_excel_download(matched, missing, extra, pr_norm, gstr_norm, amount_tolera
         
         write_partywise_sheet(partywise_df, 'Partywise')
         write_sheet(fully, 'Fully Matched')
-        write_sheet(fuzzy, 'Fully Matched (Fuzzy)')
+        write_sheet(near_match, 'Invoice Correction Needed')
         write_sheet(mismatch, 'Value Mismatch')
         write_sheet(missing, 'Missing in 2B')
         write_sheet(extra, 'Extra in 2B')
@@ -438,7 +413,7 @@ def to_excel_download(matched, missing, extra, pr_norm, gstr_norm, amount_tolera
             'Category': [
                 'Partywise Total Parties',
                 'Fully Matched',
-                'Fully Matched (Fuzzy)',
+                'Invoice Correction Needed (Near Match)',
                 'Value Mismatch',
                 'Missing in GSTR-2B',
                 'Extra in GSTR-2B',
@@ -447,11 +422,11 @@ def to_excel_download(matched, missing, extra, pr_norm, gstr_norm, amount_tolera
             'Count': [
                 len(partywise_df),
                 len(fully),
-                len(fuzzy),
+                len(near_match),
                 len(mismatch),
                 len(missing),
                 len(extra),
-                len(fully) + len(fuzzy) + len(mismatch) + len(missing)
+                len(fully) + len(near_match) + len(mismatch) + len(missing)
             ]
         }
         summary_df = pd.DataFrame(summary_data)
@@ -658,16 +633,13 @@ with tab1:
             st.subheader("📊 Advanced Reconciliation Summary")
             
             partywise_df = create_partywise_summary(pr_norm, gstr_norm, amount_tol)
-            
-            fully_count = len(matched[matched['Status'] == 'Fully Matched']) if not matched.empty else 0
-            fuzzy_count = len(matched[matched['Status'] == 'Fully Matched (Fuzzy)']) if not matched.empty else 0
-            mismatch_count = len(matched[matched['Status'] == 'Value Mismatch']) if not matched.empty else 0
+            fully_parties = len(partywise_df[partywise_df['Status'] == 'Fully Matched'])
             
             m1, m2, m3, m4 = st.columns(4)
-            m1.metric("✅ Fully Matched", fully_count)
-            m2.metric("🔄 Fully Matched (Fuzzy)", fuzzy_count)
-            m3.metric("⚠️ Value Mismatch", mismatch_count)
-            m4.metric("🔴 Missing in 2B", len(missing))
+            m1.metric("👥 Total Parties", len(partywise_df))
+            m2.metric("✅ Fully Matched Parties", fully_parties)
+            m3.metric("🔴 Missing in 2B Invoices", len(missing))
+            m4.metric("🟡 Extra in 2B Invoices", len(extra))
             
             excel_bytes = to_excel_download(matched, missing, extra, pr_norm, gstr_norm, amount_tol)
             st.download_button(
@@ -678,34 +650,27 @@ with tab1:
                 use_container_width=True
             )
             
-            r1, r2, r3, r4, r5, r6 = st.tabs([
-                "👥 Partywise", 
-                "✅ Fully Matched", 
-                "🔄 Fully Matched (Fuzzy)", 
-                "⚠️ Value Mismatch", 
-                "Missing in 2B", 
-                "Extra in 2B"
-            ])
+            r1, r2, r3, r4, r5, r6 = st.tabs(["👥 Partywise", "✅ Fully Matched", "📋 Invoice Correction", "⚠️ Value Mismatch", "Missing in 2B", "Extra in 2B"])
             
             with r1:
                 st.dataframe(partywise_df, use_container_width=True, height=400)
             
             with r2:
-                fully_df = matched[matched['Status'] == 'Fully Matched'] if not matched.empty else pd.DataFrame()
+                fully_df = matched[matched['Status'].str.contains('Fully Matched', na=False)] if not matched.empty else pd.DataFrame()
                 if not fully_df.empty:
                     st.dataframe(fully_df, use_container_width=True, height=400)
                 else:
                     st.info("No fully matched invoices.")
             
             with r3:
-                fuzzy_df = matched[matched['Status'] == 'Fully Matched (Fuzzy)'] if not matched.empty else pd.DataFrame()
-                if not fuzzy_df.empty:
-                    st.dataframe(fuzzy_df, use_container_width=True, height=400)
+                near_df = matched[matched['Status'].str.contains('needs correction', na=False)] if not matched.empty else pd.DataFrame()
+                if not near_df.empty:
+                    st.dataframe(near_df, use_container_width=True, height=400)
                 else:
-                    st.success("No fuzzy matched invoices.")
+                    st.success("No invoice number corrections needed.")
 
             with r4:
-                mismatch_df = matched[matched['Status'] == 'Value Mismatch'] if not matched.empty else pd.DataFrame()
+                mismatch_df = matched[matched['Status'].str.contains('Mismatch', na=False)] if not matched.empty else pd.DataFrame()
                 if not mismatch_df.empty:
                     st.dataframe(enrich_mismatch(mismatch_df), use_container_width=True, height=400)
                 else:
@@ -727,23 +692,22 @@ with tab2:
     st.markdown("""
     ### Partywise & Matching Guide
     
-    **3 Clear Matching Levels:**
+    1. **Partywise Sheet (Detailed Taxes)**
+       - Groups data by Supplier GSTIN.
+       - Shows separate columns for **IGST**, **CGST**, and **SGST** for both Books and 2B, along with individual differences.
+       - Rows where invoice counts and all tax/taxable values fully match are highlighted in **Yellow**.
     
-    1. **Fully Matched** → Exact Invoice Number + Amount match
-    2. **Fully Matched (Fuzzy)** → Invoice Number almost same / Near match + Amount match
-    3. **Value Mismatch** → Amount different (exact or fuzzy)
-    
-    **Partywise Sheet** shows supplier-wise summary with separate IGST / CGST / SGST columns.
+    2. **Matching Levels**
+       - Exact, Fuzzy, and Near Match (Invoice Correction).
     """)
 
 with tab3:
     st.markdown("""
     ### About Jarvis GST Advanced
     
-    - **Ownership**: 100% yours  
-    - **Privacy**: Local processing only  
-    - **Matching**: Exact + Fuzzy + Near Match  
+    - **Ownership**: 100% yours (GitHub deployed)  
+    - **Privacy**: Local processing.  
     """)
 
 st.markdown("---")
-st.caption("Jarvis GST Advanced • Local Reconciliation Platform • Your data stays with you")
+st.caption("Jarvis GST Advanced • Local Reconciliation Platform")
