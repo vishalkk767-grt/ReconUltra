@@ -65,7 +65,6 @@ def clean_invoice(val):
     if pd.isna(val):
         return ""
     s = str(val).strip().upper()
-    # Remove common noise but keep structure
     s = re.sub(r'[\s\.\-_/\\]', '', s)
     return s
 
@@ -88,7 +87,6 @@ def parse_date(val):
         return None
 
 def normalize_df(df, mapping):
-    """Create standardized columns from user mapping"""
     result = pd.DataFrame()
     result['gstin'] = df[mapping['gstin']].apply(clean_gstin)
     result['invoice_no'] = df[mapping['invoice_no']].apply(clean_invoice)
@@ -99,8 +97,6 @@ def normalize_df(df, mapping):
     result['cgst'] = df[mapping.get('cgst', mapping['taxable'])].apply(clean_amount) if mapping.get('cgst') else 0.0
     result['sgst'] = df[mapping.get('sgst', mapping['taxable'])].apply(clean_amount) if mapping.get('sgst') else 0.0
     result['total_tax'] = result['igst'] + result['cgst'] + result['sgst']
-    
-    # Keep original row index for later
     result['orig_idx'] = df.index
     return result
 
@@ -108,7 +104,6 @@ def create_match_key(gstin, inv):
     return f"{gstin}|{inv}"
 
 def fuzzy_invoice_match(inv, candidates, threshold=85):
-    """Find best fuzzy match for invoice number"""
     if not candidates:
         return None, 0
     match = process.extractOne(inv, candidates, scorer=fuzz.ratio)
@@ -117,27 +112,20 @@ def fuzzy_invoice_match(inv, candidates, threshold=85):
     return None, 0
 
 def reconcile(pr_df, gstr_df, amount_tolerance=2.0, fuzzy_threshold=88):
-    """
-    Main reconciliation engine
-    Returns categorized dataframes
-    """
     pr = pr_df.copy()
     gstr = gstr_df.copy()
     
     pr['key'] = pr.apply(lambda r: create_match_key(r['gstin'], r['invoice_no']), axis=1)
     gstr['key'] = gstr.apply(lambda r: create_match_key(r['gstin'], r['invoice_no']), axis=1)
     
-    # Exact key match
     pr_keys = set(pr['key'])
     gstr_keys = set(gstr['key'])
-    
     exact_matched_keys = pr_keys & gstr_keys
     
-    # For remaining, try fuzzy per GSTIN
     remaining_pr = pr[\~pr['key'].isin(exact_matched_keys)].copy()
     remaining_gstr = gstr[\~gstr['key'].isin(exact_matched_keys)].copy()
     
-    fuzzy_matches = []  # list of (pr_idx, gstr_idx, score)
+    fuzzy_matches = []
     
     for gstin, pr_group in remaining_pr.groupby('gstin'):
         gstr_group = remaining_gstr[remaining_gstr['gstin'] == gstin]
@@ -156,10 +144,8 @@ def reconcile(pr_df, gstr_df, amount_tolerance=2.0, fuzzy_threshold=88):
                 fuzzy_matches.append((pr_idx, gstr_idx, score))
                 used_gstr.add(best_inv)
     
-    # Build result categories
     matched_rows = []
     
-    # Exact matches
     for key in exact_matched_keys:
         pr_row = pr[pr['key'] == key].iloc[0]
         gstr_row = gstr[gstr['key'] == key].iloc[0]
@@ -187,7 +173,6 @@ def reconcile(pr_df, gstr_df, amount_tolerance=2.0, fuzzy_threshold=88):
             'Fuzzy Score': 100
         })
     
-    # Fuzzy matches
     for pr_idx, gstr_idx, score in fuzzy_matches:
         pr_row = pr.loc[pr_idx]
         gstr_row = gstr.loc[gstr_idx]
@@ -217,7 +202,6 @@ def reconcile(pr_df, gstr_df, amount_tolerance=2.0, fuzzy_threshold=88):
     
     matched_df = pd.DataFrame(matched_rows)
     
-    # Missing in 2B (in PR but not matched)
     matched_pr_idxs = set()
     for key in exact_matched_keys:
         matched_pr_idxs.add(pr[pr['key'] == key].index[0])
@@ -228,7 +212,6 @@ def reconcile(pr_df, gstr_df, amount_tolerance=2.0, fuzzy_threshold=88):
     missing_in_2b = missing_in_2b[['gstin', 'invoice_no_raw', 'taxable', 'igst', 'cgst', 'sgst', 'total_tax']]
     missing_in_2b.columns = ['GSTIN', 'Invoice No', 'Taxable', 'IGST', 'CGST', 'SGST', 'Total Tax']
     
-    # Extra in 2B (in GSTR but not matched)
     matched_gstr_idxs = set()
     for key in exact_matched_keys:
         matched_gstr_idxs.add(gstr[gstr['key'] == key].index[0])
@@ -251,7 +234,6 @@ def to_excel_download(matched, missing, extra):
         if not extra.empty:
             extra.to_excel(writer, sheet_name='Extra in 2B', index=False)
         
-        # Summary sheet
         summary_data = {
             'Category': ['Fully Matched', 'Value Mismatch', 'Missing in GSTR-2B', 'Extra in GSTR-2B'],
             'Count': [
@@ -267,12 +249,10 @@ def to_excel_download(matched, missing, extra):
     return output
 
 def try_parse_gstr2b_json(file):
-    """Basic GSTR-2B JSON parser for B2B section"""
     try:
         data = json.load(file)
         rows = []
         
-        # Common paths in GSTR-2B JSON
         docdata = None
         if 'data' in data:
             if 'docdata' in data['data']:
@@ -350,136 +330,196 @@ with tab1:
         gstr_file = st.file_uploader("Upload Excel / CSV / JSON", type=['xlsx', 'xls', 'csv', 'json'], key="gstr")
     
     if pr_file and gstr_file:
-        # Load files
         try:
-            # Purchase Register
             if pr_file.name.endswith('.csv'):
                 pr_raw = pd.read_csv(pr_file)
             else:
                 pr_raw = pd.read_excel(pr_file)
-            
-            # GSTR-2B
-            if gstr_file.name.endswith('.json'):
-                gstr_raw = try_parse_gstr2b_json(gstr_file)
-                if gstr_raw is None:
-                    st.error("Could not parse GSTR-2B JSON. Please upload Excel version.")
-                    st.stop()
-            elif gstr_file.name.endswith('.csv'):
-                gstr_raw = pd.read_csv(gstr_file)
-            else:
-                gstr_raw = pd.read_excel(gstr_file)
-            
-            st.success("Files loaded successfully!")
-            
-            # Column mapping UI
-            st.markdown("### Column Mapping")
-            
-            pr_cols = list(pr_raw.columns)
-            gstr_cols = list(gstr_raw.columns)
-            
-            col_a, col_b = st.columns(2)
-            
-            with col_a:
-                st.markdown("**Purchase Register Columns**")
-                pr_gstin = st.selectbox("Supplier GSTIN", pr_cols, key="pr_gstin")
-                pr_inv = st.selectbox("Invoice Number", pr_cols, key="pr_inv")
-                pr_date = st.selectbox("Invoice Date (optional)", ["None"] + pr_cols, key="pr_date")
-                pr_taxable = st.selectbox("Taxable Value", pr_cols, key="pr_taxable")
-                pr_igst = st.selectbox("IGST (optional)", ["None"] + pr_cols, key="pr_igst")
-                pr_cgst = st.selectbox("CGST (optional)", ["None"] + pr_cols, key="pr_cgst")
-                pr_sgst = st.selectbox("SGST (optional)", ["None"] + pr_cols, key="pr_sgst")
-            
-            with col_b:
-                st.markdown("**GSTR-2B Columns**")
-                gstr_gstin = st.selectbox("Supplier GSTIN", gstr_cols, key="gstr_gstin")
-                gstr_inv = st.selectbox("Invoice Number", gstr_cols, key="gstr_inv")
-                gstr_date = st.selectbox("Invoice Date (optional)", ["None"] + gstr_cols, key="gstr_date")
-                gstr_taxable = st.selectbox("Taxable Value", gstr_cols, key="gstr_taxable")
-                gstr_igst = st.selectbox("IGST (optional)", ["None"] + gstr_cols, key="gstr_igst")
-                gstr_cgst = st.selectbox("CGST (optional)", ["None"] + gstr_cols, key="gstr_cgst")
-                gstr_sgst = st.selectbox("SGST (optional)", ["None"] + gstr_cols, key="gstr_sgst")
-            
-            if st.button("▶ Run Reconciliation", type="primary"):
-                with st.spinner("Reconciling..."):
-                    pr_mapping = {
-                        'gstin': pr_gstin,
-                        'invoice_no': pr_inv,
-                        'invoice_date': pr_date if pr_date != "None" else None,
-                        'taxable': pr_taxable,
-                        'igst': pr_igst if pr_igst != "None" else None,
-                        'cgst': pr_cgst if pr_cgst != "None" else None,
-                        'sgst': pr_sgst if pr_sgst != "None" else None,
-                    }
-                    
-                    gstr_mapping = {
-                        'gstin': gstr_gstin,
-                        'invoice_no': gstr_inv,
-                        'invoice_date': gstr_date if gstr_date != "None" else None,
-                        'taxable': gstr_taxable,
-                        'igst': gstr_igst if gstr_igst != "None" else None,
-                        'cgst': gstr_cgst if gstr_cgst != "None" else None,
-                        'sgst': gstr_sgst if gstr_sgst != "None" else None,
-                    }
-                    
-                    pr_norm = normalize_df(pr_raw, pr_mapping)
-                    gstr_norm = normalize_df(gstr_raw, gstr_mapping)
-                    
-                    matched, missing, extra = reconcile(pr_norm, gstr_norm, amount_tol, fuzzy_th)
-                    
-                    # Metrics
-                    m1, m2, m3, m4 = st.columns(4)
-                    fully = len(matched[matched['Status'].str.contains('Fully Matched')]) if not matched.empty else 0
-                    mismatch = len(matched[matched['Status'].str.contains('Mismatch')]) if not matched.empty else 0
-                    
-                    m1.metric("Fully Matched", fully)
-                    m2.metric("Value Mismatch", mismatch)
-                    m3.metric("Missing in 2B", len(missing))
-                    m4.metric("Extra in 2B", len(extra))
-                    
-                    st.markdown("### Results")
-                    
-                    if not matched.empty:
-                        st.subheader("Matched Invoices")
-                        st.dataframe(matched, use_container_width=True)
-                    
-                    if not missing.empty:
-                        st.subheader("Missing in GSTR-2B (ITC Risk)")
-                        st.dataframe(missing, use_container_width=True)
-                    
-                    if not extra.empty:
-                        st.subheader("Extra in GSTR-2B")
-                        st.dataframe(extra, use_container_width=True)
-                    
-                    # Download
-                    excel_data = to_excel_download(matched, missing, extra)
-                    st.download_button(
-                        label="📥 Download Full Report (Excel)",
-                        data=excel_data,
-                        file_name=f"Jarvis_GST_Reconciliation_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-        
         except Exception as e:
-            st.error(f"Error loading files: {e}")
+            st.error(f"Purchase file error: {e}")
+            st.stop()
+        
+        gstr_raw = None
+        if gstr_file.name.endswith('.json'):
+            gstr_raw = try_parse_gstr2b_json(gstr_file)
+            if gstr_raw is None:
+                st.error("Could not parse GSTR-2B JSON. Try Excel format instead.")
+                st.stop()
+        else:
+            try:
+                if gstr_file.name.endswith('.csv'):
+                    gstr_raw = pd.read_csv(gstr_file)
+                else:
+                    gstr_raw = pd.read_excel(gstr_file)
+            except Exception as e:
+                st.error(f"GSTR-2B file error: {e}")
+                st.stop()
+        
+        st.success(f"Loaded → Purchase: {len(pr_raw)} rows | GSTR-2B: {len(gstr_raw)} rows")
+        
+        st.markdown("### 3️⃣ Column Mapping")
+        st.caption("Select the correct columns from your files. Common names are auto-selected when possible.")
+        
+        def auto_select(cols, keywords):
+            cols_lower = [c.lower() for c in cols]
+            for kw in keywords:
+                for i, c in enumerate(cols_lower):
+                    if kw in c:
+                        return cols[i]
+            return cols[0] if cols else None
+        
+        pr_cols = list(pr_raw.columns)
+        gstr_cols = list(gstr_raw.columns)
+        
+        map_col1, map_col2 = st.columns(2)
+        
+        with map_col1:
+            st.markdown("**Purchase Register columns**")
+            pr_gstin = st.selectbox("Supplier GSTIN", pr_cols, 
+                                    index=pr_cols.index(auto_select(pr_cols, ['gstin', 'gstin of supplier', 'supplier gstin', 'ctin'])) 
+                                    if auto_select(pr_cols, ['gstin', 'gstin of supplier', 'supplier gstin', 'ctin']) in pr_cols else 0)
+            pr_inv = st.selectbox("Invoice Number", pr_cols,
+                                  index=pr_cols.index(auto_select(pr_cols, ['invoice', 'inv no', 'document no', 'bill no'])) 
+                                  if auto_select(pr_cols, ['invoice', 'inv no', 'document no', 'bill no']) in pr_cols else 0)
+            pr_date = st.selectbox("Invoice Date (optional)", ['-- None --'] + pr_cols, index=0)
+            pr_taxable = st.selectbox("Taxable Value", pr_cols,
+                                      index=pr_cols.index(auto_select(pr_cols, ['taxable', 'taxable value', 'taxable amt'])) 
+                                      if auto_select(pr_cols, ['taxable', 'taxable value', 'taxable amt']) in pr_cols else 0)
+            pr_igst = st.selectbox("IGST", ['-- None --'] + pr_cols,
+                                   index=(['-- None --'] + pr_cols).index(auto_select(pr_cols, ['igst', 'integrated'])) 
+                                   if auto_select(pr_cols, ['igst', 'integrated']) else 0)
+            pr_cgst = st.selectbox("CGST", ['-- None --'] + pr_cols,
+                                   index=(['-- None --'] + pr_cols).index(auto_select(pr_cols, ['cgst', 'central'])) 
+                                   if auto_select(pr_cols, ['cgst', 'central']) else 0)
+            pr_sgst = st.selectbox("SGST / UTGST", ['-- None --'] + pr_cols,
+                                   index=(['-- None --'] + pr_cols).index(auto_select(pr_cols, ['sgst', 'utgst', 'state'])) 
+                                   if auto_select(pr_cols, ['sgst', 'utgst', 'state']) else 0)
+        
+        with map_col2:
+            st.markdown("**GSTR-2B columns**")
+            g_gstin = st.selectbox("Supplier GSTIN", gstr_cols, key="g_gstin",
+                                   index=gstr_cols.index(auto_select(gstr_cols, ['gstin', 'gstin of supplier', 'supplier gstin', 'ctin'])) 
+                                   if auto_select(gstr_cols, ['gstin', 'gstin of supplier', 'supplier gstin', 'ctin']) in gstr_cols else 0)
+            g_inv = st.selectbox("Invoice Number", gstr_cols, key="g_inv",
+                                 index=gstr_cols.index(auto_select(gstr_cols, ['invoice', 'inv no', 'document no', 'inum'])) 
+                                 if auto_select(gstr_cols, ['invoice', 'inv no', 'document no', 'inum']) in gstr_cols else 0)
+            g_date = st.selectbox("Invoice Date (optional)", ['-- None --'] + gstr_cols, key="g_date", index=0)
+            g_taxable = st.selectbox("Taxable Value", gstr_cols, key="g_taxable",
+                                     index=gstr_cols.index(auto_select(gstr_cols, ['taxable', 'taxable value', 'val'])) 
+                                     if auto_select(gstr_cols, ['taxable', 'taxable value', 'val']) in gstr_cols else 0)
+            g_igst = st.selectbox("IGST", ['-- None --'] + gstr_cols, key="g_igst",
+                                  index=(['-- None --'] + gstr_cols).index(auto_select(gstr_cols, ['igst', 'integrated', 'iamt'])) 
+                                  if auto_select(gstr_cols, ['igst', 'integrated', 'iamt']) else 0)
+            g_cgst = st.selectbox("CGST", ['-- None --'] + gstr_cols, key="g_cgst",
+                                  index=(['-- None --'] + gstr_cols).index(auto_select(gstr_cols, ['cgst', 'central', 'camt'])) 
+                                  if auto_select(gstr_cols, ['cgst', 'central', 'camt']) else 0)
+            g_sgst = st.selectbox("SGST / UTGST", ['-- None --'] + gstr_cols, key="g_sgst",
+                                  index=(['-- None --'] + gstr_cols).index(auto_select(gstr_cols, ['sgst', 'utgst', 'state', 'samt'])) 
+                                  if auto_select(gstr_cols, ['sgst', 'utgst', 'state', 'samt']) else 0)
+        
+        if st.button("🚀 Run Reconciliation", type="primary", use_container_width=True):
+            with st.spinner("Jarvis is matching invoices..."):
+                pr_map = {
+                    'gstin': pr_gstin,
+                    'invoice_no': pr_inv,
+                    'invoice_date': pr_date if pr_date != '-- None --' else None,
+                    'taxable': pr_taxable,
+                    'igst': pr_igst if pr_igst != '-- None --' else None,
+                    'cgst': pr_cgst if pr_cgst != '-- None --' else None,
+                    'sgst': pr_sgst if pr_sgst != '-- None --' else None,
+                }
+                g_map = {
+                    'gstin': g_gstin,
+                    'invoice_no': g_inv,
+                    'invoice_date': g_date if g_date != '-- None --' else None,
+                    'taxable': g_taxable,
+                    'igst': g_igst if g_igst != '-- None --' else None,
+                    'cgst': g_cgst if g_cgst != '-- None --' else None,
+                    'sgst': g_sgst if g_sgst != '-- None --' else None,
+                }
+                
+                pr_norm = normalize_df(pr_raw, pr_map)
+                gstr_norm = normalize_df(gstr_raw, g_map)
+                
+                pr_norm = pr_norm[(pr_norm['gstin'] != '') & (pr_norm['invoice_no'] != '')]
+                gstr_norm = gstr_norm[(gstr_norm['gstin'] != '') & (gstr_norm['invoice_no'] != '')]
+                
+                matched, missing, extra = reconcile(pr_norm, gstr_norm, 
+                                                    amount_tolerance=amount_tol,
+                                                    fuzzy_threshold=fuzzy_th)
+                
+                st.session_state['matched'] = matched
+                st.session_state['missing'] = missing
+                st.session_state['extra'] = extra
+                st.session_state['done'] = True
+        
+        if st.session_state.get('done'):
+            matched = st.session_state['matched']
+            missing = st.session_state['missing']
+            extra = st.session_state['extra']
+            
+            st.markdown("---")
+            st.subheader("📊 Reconciliation Summary")
+            
+            fully = len(matched[matched['Status'].str.contains('Fully Matched')]) if not matched.empty else 0
+            mismatch = len(matched[matched['Status'].str.contains('Mismatch')]) if not matched.empty else 0
+            
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("✅ Fully Matched", fully)
+            m2.metric("⚠️ Value Mismatch", mismatch)
+            m3.metric("🔴 Missing in 2B", len(missing), help="Invoices in your books but not in GSTR-2B")
+            m4.metric("🟡 Extra in 2B", len(extra), help="In GSTR-2B but not found in your books")
+            
+            excel_bytes = to_excel_download(matched, missing, extra)
+            st.download_button(
+                label="📥 Download Full Report (Excel)",
+                data=excel_bytes,
+                file_name=f"Jarvis_GST_Reconciliation_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+            
+            r1, r2, r3 = st.tabs(["Matched Invoices", "Missing in GSTR-2B", "Extra in GSTR-2B"])
+            
+            with r1:
+                if not matched.empty:
+                    st.dataframe(matched, use_container_width=True, height=400)
+                else:
+                    st.info("No matched invoices found.")
+            
+            with r2:
+                if not missing.empty:
+                    st.warning("These invoices are in your Purchase Register but missing in GSTR-2B. Follow up with suppliers.")
+                    st.dataframe(missing, use_container_width=True, height=400)
+                else:
+                    st.success("No missing invoices. Great!")
+            
+            with r3:
+                if not extra.empty:
+                    st.info("These appear in GSTR-2B but were not found in your books. Check if you missed booking them.")
+                    st.dataframe(extra, use_container_width=True, height=400)
+                else:
+                    st.success("No extra invoices in 2B.")
 
 with tab2:
     st.markdown("""
-    ### How to use Jarvis GST
+    ### How Jarvis matches data
     
-    1. Upload your **Purchase Register** (from Tally / Zoho / Excel)
-    2. Upload **GSTR-2B** (Excel or JSON from GST portal)
-    3. Map the columns (GSTIN, Invoice No, Taxable Value etc.)
-    4. Click **Run Reconciliation**
-    5. Download the Excel report
+    1. **Normalization**
+       - GSTIN → uppercase, remove spaces
+       - Invoice Number → uppercase, remove spaces / dashes / slashes for matching
     
-    ---
+    2. **Exact Match**
+       - First tries GSTIN + cleaned Invoice Number
     
-    ### Matching Logic
-    - First tries **Exact Match** on GSTIN + Invoice Number
-    - Then tries **Fuzzy Match** for slight differences in invoice numbers
-    - Compares Taxable Value + IGST + CGST + SGST
-    - Difference within tolerance = Fully Matched
-    - Beyond tolerance = Value Mismatch
+    3. **Fuzzy Match**
+       - If exact fails, for same GSTIN it looks for similar invoice numbers
+       - Uses advanced string similarity (you control the threshold)
+    
+    4. **Amount Check**
+       - Compares Taxable Value + IGST + CGST + SGST
+       - Difference within tolerance = Fully Matched
+       - Beyond tolerance = Value Mismatch
     
     ### Recommended columns in Purchase Register
     - Supplier GSTIN
@@ -497,9 +537,9 @@ with tab3:
     st.markdown("""
     ### About Jarvis GST
     
-    - **Name**: Jarvis GST Reconciliation Platform
-    - **Ownership**: 100% yours
-    - **Privacy**: All processing happens on your computer. No data is uploaded anywhere.
+    - **Name**: Jarvis GST Reconciliation Platform  
+    - **Ownership**: 100% yours  
+    - **Privacy**: All processing happens on your computer. No data is uploaded anywhere.  
     - **Tech**: Python + Streamlit + RapidFuzz + Pandas  
     
     You can modify the code, add new features, or white-label it.
