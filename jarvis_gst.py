@@ -122,8 +122,8 @@ def reconcile(pr_df, gstr_df, amount_tolerance=2.0, fuzzy_threshold=88):
     gstr_keys = set(gstr['key'])
     exact_matched_keys = pr_keys & gstr_keys
     
-    remaining_pr = pr[\~pr['key'].isin(exact_matched_keys)].copy()
-    remaining_gstr = gstr[\~gstr['key'].isin(exact_matched_keys)].copy()
+    remaining_pr = pr[~pr['key'].isin(exact_matched_keys)].copy()
+    remaining_gstr = gstr[~gstr['key'].isin(exact_matched_keys)].copy()
     
     fuzzy_matches = []
     for gstin, pr_group in remaining_pr.groupby('gstin'):
