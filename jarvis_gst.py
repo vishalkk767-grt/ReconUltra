@@ -1,9 +1,9 @@
 """
-Jarvis GST Reconciliation Platform (Advanced Edition)
+Jarvis GST Reconciliation Platform (Advanced Fixed Edition)
 --------------------------------------------------
 Full local ownership. Runs entirely on your computer.
 Purchase Register vs GSTR-2B matching for B2B invoices.
-Features: 3-Level Matching, Advanced Cleaning, Near Match (Invoice Correction), Light Brown Highlighting.
+Features: 3-Level Matching, Advanced Cleaning, Near Match (Invoice Correction), Color Highlights.
 """
 
 import streamlit as st
@@ -60,8 +60,7 @@ def clean_invoice(val):
     if pd.isna(val):
         return ""
     s = str(val).strip().upper()
-    s_cleaned = re.sub(r'[\s\.\-_/\\]', '', s)
-    return s_cleaned
+    return re.sub(r'[\s\.\-_/\\]', '', s)
 
 def get_normalized_inv_for_matching(val):
     if pd.isna(val):
@@ -100,9 +99,11 @@ def normalize_df(df, mapping):
     result['invoice_no_raw'] = df[mapping['invoice_no']].astype(str).str.strip()
     result['invoice_date'] = df[mapping['invoice_date']].apply(parse_date) if mapping.get('invoice_date') else None
     result['taxable'] = df[mapping['taxable']].apply(clean_amount) if mapping.get('taxable') else 0.0
-    result['igst'] = df[mapping.get('igst', mapping['taxable'])].apply(clean_amount) if mapping.get('igst') else 0.0
-    result['cgst'] = df[mapping.get('cgst', mapping['taxable'])].apply(clean_amount) if mapping.get('cgst') else 0.0
-    result['sgst'] = df[mapping.get('sgst', mapping['taxable'])].apply(clean_amount) if mapping.get('sgst') else 0.0
+    
+    result['igst'] = df[mapping['igst']].apply(clean_amount) if (mapping.get('igst') and mapping['igst'] in df.columns) else 0.0
+    result['cgst'] = df[mapping['cgst']].apply(clean_amount) if (mapping.get('cgst') and mapping['cgst'] in df.columns) else 0.0
+    result['sgst'] = df[mapping['sgst']].apply(clean_amount) if (mapping.get('sgst') and mapping['sgst'] in df.columns) else 0.0
+    
     result['total_tax'] = result['igst'] + result['cgst'] + result['sgst']
     result['orig_idx'] = df.index
     return result
@@ -198,12 +199,9 @@ def reconcile(pr_df, gstr_df, amount_tolerance=2.0, fuzzy_threshold=88):
             'Taxable (Books)': pr_row['taxable'],
             'Taxable (2B)': gstr_row['taxable'],
             'Tax Diff': round(pr_row['total_tax'] - gstr_row['total_tax'], 2),
-            'IGST (Books)': pr_row['igst'],
-            'IGST (2B)': gstr_row['igst'],
-            'CGST (Books)': pr_row['cgst'],
-            'CGST (2B)': gstr_row['cgst'],
-            'SGST (Books)': pr_row['sgst'],
-            'SGST (2B)': gstr_row['sgst'],
+            'IGST (Books)': pr_row['igst'], 'IGST (2B)': gstr_row['igst'],
+            'CGST (Books)': pr_row['cgst'], 'CGST (2B)': gstr_row['cgst'],
+            'SGST (Books)': pr_row['sgst'], 'SGST (2B)': gstr_row['sgst'],
             'Fuzzy Score': 100
         })
     
@@ -225,16 +223,13 @@ def reconcile(pr_df, gstr_df, amount_tolerance=2.0, fuzzy_threshold=88):
             'Taxable (Books)': pr_row['taxable'],
             'Taxable (2B)': gstr_row['taxable'],
             'Tax Diff': round(pr_row['total_tax'] - gstr_row['total_tax'], 2),
-            'IGST (Books)': pr_row['igst'],
-            'IGST (2B)': gstr_row['igst'],
-            'CGST (Books)': pr_row['cgst'],
-            'CGST (2B)': gstr_row['cgst'],
-            'SGST (Books)': pr_row['sgst'],
-            'SGST (2B)': gstr_row['sgst'],
+            'IGST (Books)': pr_row['igst'], 'IGST (2B)': gstr_row['igst'],
+            'CGST (Books)': pr_row['cgst'], 'CGST (2B)': gstr_row['cgst'],
+            'SGST (Books)': pr_row['sgst'], 'SGST (2B)': gstr_row['sgst'],
             'Fuzzy Score': score
         })
 
-    # 3. Near Matches (Invoice No needs correction)
+    # 3. Near Matches
     for pr_idx, gstr_idx in near_matches:
         pr_row = pr.loc[pr_idx]
         gstr_row = gstr.loc[gstr_idx]
@@ -248,12 +243,9 @@ def reconcile(pr_df, gstr_df, amount_tolerance=2.0, fuzzy_threshold=88):
             'Taxable (Books)': pr_row['taxable'],
             'Taxable (2B)': gstr_row['taxable'],
             'Tax Diff': round(pr_row['total_tax'] - gstr_row['total_tax'], 2),
-            'IGST (Books)': pr_row['igst'],
-            'IGST (2B)': gstr_row['igst'],
-            'CGST (Books)': pr_row['cgst'],
-            'CGST (2B)': gstr_row['cgst'],
-            'SGST (Books)': pr_row['sgst'],
-            'SGST (2B)': gstr_row['sgst'],
+            'IGST (Books)': pr_row['igst'], 'IGST (2B)': gstr_row['igst'],
+            'CGST (Books)': pr_row['cgst'], 'CGST (2B)': gstr_row['cgst'],
+            'SGST (Books)': pr_row['sgst'], 'SGST (2B)': gstr_row['sgst'],
             'Fuzzy Score': 95
         })
     
@@ -307,12 +299,12 @@ def to_excel_download(matched, missing, extra):
     if not matched.empty:
         fully = matched[matched['Status'].str.contains('Fully Matched', na=False)].copy()
         near_match = matched[matched['Status'].str.contains('needs correction', na=False)].copy()
-        mismatch = matched[matched['Status'].str.contains('Mismatch', na=False)].copy()
-        mismatch = enrich_mismatch(mismatch)
+        mismatch_df_sub = matched[matched['Status'].str.contains('Mismatch', na=False)].copy()
+        mismatch_df_sub = enrich_mismatch(mismatch_df_sub)
     else:
         fully = pd.DataFrame()
         near_match = pd.DataFrame()
-        mismatch = pd.DataFrame()
+        mismatch_df_sub = pd.DataFrame()
     
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         workbook = writer.book
@@ -322,7 +314,7 @@ def to_excel_download(matched, missing, extra):
             'border': 1, 'align': 'center', 'valign': 'vcenter'
         })
         green_fmt = workbook.add_format({'bg_color': '#C6EFCE', 'border': 1})
-        brown_fmt = workbook.add_format({'bg_color': '#D2B48C', 'border': 1}) # Light Brown for Invoice Correction
+        brown_fmt = workbook.add_format({'bg_color': '#D2B48C', 'border': 1})
         yellow_fmt = workbook.add_format({'bg_color': '#FFEB9C', 'border': 1})
         red_fmt = workbook.add_format({'bg_color': '#FFC7CE', 'border': 1})
         normal_fmt = workbook.add_format({'border': 1})
@@ -355,7 +347,7 @@ def to_excel_download(matched, missing, extra):
         
         write_sheet(fully, 'Fully Matched', green_fmt)
         write_sheet(near_match, 'Invoice Correction Needed', brown_fmt)
-        write_sheet(mismatch, 'Value Mismatch', yellow_fmt)
+        write_sheet(mismatch_df_sub, 'Value Mismatch', yellow_fmt)
         write_sheet(missing, 'Missing in 2B', red_fmt)
         write_sheet(extra, 'Extra in 2B', None)
         
@@ -371,10 +363,10 @@ def to_excel_download(matched, missing, extra):
             'Count': [
                 len(fully),
                 len(near_match),
-                len(mismatch),
+                len(mismatch_df_sub),
                 len(missing),
                 len(extra),
-                len(fully) + len(near_match) + len(mismatch) + len(missing)
+                len(fully) + len(near_match) + len(mismatch_df_sub) + len(missing)
             ]
         }
         summary_df = pd.DataFrame(summary_data)
@@ -438,23 +430,13 @@ with st.sidebar:
                          help="Higher = stricter invoice number matching")
     
     st.markdown("---")
-    st.markdown("### How to use")
-    st.markdown("""
-    1. Upload **Purchase Register** Excel  
-    2. Upload **GSTR-2B** Excel or JSON  
-    3. Map columns  
-    4. Click **Run Advanced Reconciliation**  
-    5. Download full report with Light Brown highlights for invoice corrections
-    """)
-    
-    st.markdown("---")
     st.info("🔒 100% Local • Your data never leaves your computer")
 
 # --------------------------
 # Main UI
 # --------------------------
 st.markdown('<div class="main-header">🤖 Jarvis GST Advanced</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">Purchase Register ↔ GSTR-2B Reconciliation Platform with 3-Level Matching</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-header">Purchase Register ↔ GSTR-2B Reconciliation Platform</div>', unsafe_allow_html=True)
 
 tab1, tab2, tab3 = st.tabs(["🔄 Reconcile", "📖 Guide", "ℹ️ About"])
 
@@ -580,12 +562,12 @@ with tab1:
             
             fully = len(matched[matched['Status'].str.contains('Fully Matched', na=False)]) if not matched.empty else 0
             near_match_count = len(matched[matched['Status'].str.contains('needs correction', na=False)]) if not matched.empty else 0
-            mismatch = len(matched[matched['Status'].str.contains('Mismatch', na=False)]) if not matched.empty else 0
+            mismatch_count = len(matched[matched['Status'].str.contains('Mismatch', na=False)]) if not matched.empty else 0
             
             m1, m2, m3, m4, m5 = st.columns(5)
             m1.metric("✅ Fully Matched", fully)
             m2.metric("🟤 Invoice Correction", near_match_count)
-            m3.metric("⚠️ Value Mismatch", mismatch)
+            m3.metric("⚠️ Value Mismatch", mismatch_count)
             m4.metric("🔴 Missing in 2B", len(missing))
             m5.metric("🟡 Extra in 2B", len(extra))
             
@@ -610,54 +592,40 @@ with tab1:
             with r2:
                 near_df = matched[matched['Status'].str.contains('needs correction', na=False)] if not matched.empty else pd.DataFrame()
                 if not near_df.empty:
-                    st.warning("These invoices matched by GSTIN and Tax amount, but Invoice Numbers differ slightly (Needs Tally correction).")
+                    st.warning("These invoices matched by GSTIN and Tax amount, but Invoice Numbers differ slightly.")
                     st.dataframe(near_df, use_container_width=True, height=400)
                 else:
                     st.success("No invoice number corrections needed.")
 
             with r3:
-                mismatch_df = matched[matched['Status'].str.contains('Mismatch', na=False)] if not mismatch.empty else pd.DataFrame()
-                if not mismatch_df.empty:
-                    st.dataframe(enrich_mismatch(mismatch_df), use_container_width=True, height=400)
+                mismatch_df_tab = matched[matched['Status'].str.contains('Mismatch', na=False)] if not matched.empty else pd.DataFrame()
+                if not mismatch_df_tab.empty:
+                    st.dataframe(enrich_mismatch(mismatch_df_tab), use_container_width=True, height=400)
                 else:
                     st.success("No value mismatches.")
             
             with r4:
                 if not missing.empty:
-                    st.warning("These invoices are in your books but missing in GSTR-2B.")
                     st.dataframe(missing, use_container_width=True, height=400)
                 else:
                     st.success("No missing invoices.")
             
             with r5:
                 if not extra.empty:
-                    st.info("These appear in GSTR-2B but not found in your books.")
                     st.dataframe(extra, use_container_width=True, height=400)
                 else:
                     st.success("No extra invoices in 2B.")
 
 with tab2:
     st.markdown("""
-    ### Advanced 3-Level Matching Guide
-    
+    ### Advanced Matching Guide
     1. **Level 1: Exact Match**
-       - Matches strict GSTIN + Cleaned Invoice Number.
-    
-    2. **Level 2: Fuzzy & Cleaning Match**
-       - Removes leading zeros, common prefixes (`INV`, `BILL`, etc.), and special characters for smart matching.
-    
-    3. **Level 3: Near / Partial Match (Invoice Correction)**
-       - If invoice number is partial (e.g. `0725` vs `VS/26-27/0725`), but **GSTIN + Taxable Value + Taxes** match within tolerance, it is automatically matched with status **"Matched (Invoice No needs correction)"** and highlighted in **Light Brown** in Excel so you can easily fix it in Tally!
+    2. **Level 2: Fuzzy Match**
+    3. **Level 3: Near / Partial Match**
     """)
 
 with tab3:
-    st.markdown("""
-    ### About Jarvis GST Advanced
-    
-    - **Ownership**: 100% yours (Deployed on GitHub/Streamlit)  
-    - **Privacy**: Local processing.  
-    - **Tech**: Python + Streamlit + RapidFuzz + Pandas + xlsxwriter  
-    """)
+    st.markdown("### About Jarvis GST Advanced")
 
 st.markdown("---")
 st.caption("Jarvis GST Advanced • Local Reconciliation Platform")
