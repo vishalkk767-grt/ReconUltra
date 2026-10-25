@@ -1,8 +1,8 @@
 """
-Jarvis GST Reconciliation Platform (Advanced Edition with Float & Space Fix)
+Jarvis GST Reconciliation Platform (Ultimate Professional Edition)
 --------------------------------------------------
 Full local ownership. Purchase Register vs GSTR-2B matching for B2B invoices.
-Features: 4-Level Matching, Float Invoice Fix, Date Tracking, Color Highlights.
+Features: Single Matched Sheet, Party Name Included, Date as 1st Column, GSTIN Mismatch Detection, Smart Fallback.
 """
 
 import streamlit as st
@@ -47,7 +47,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --------------------------
-# Helper Functions & Cleaning (Updated to handle Float/Decimal issues)
+# Helper Functions & Cleaning
 # --------------------------
 
 def clean_gstin(val):
@@ -59,7 +59,6 @@ def clean_invoice(val):
     if pd.isna(val):
         return ""
     s = str(val).strip().upper().replace("\xa0", "")
-    # Fix for Excel numeric float conversion (.0 issue)
     if s.endswith('.0'):
         s = s[:-2]
     return re.sub(r'[\s\.\-_/\\]', '', s)
@@ -101,6 +100,7 @@ def parse_date(val):
 def normalize_df(df, mapping):
     result = pd.DataFrame()
     result['gstin'] = df[mapping['gstin']].apply(clean_gstin)
+    result['party_name'] = df[mapping['party_name']].astype(str).str.strip() if mapping.get('party_name') and mapping['party_name'] in df.columns else ""
     result['invoice_no'] = df[mapping['invoice_no']].apply(clean_invoice)
     result['invoice_no_match'] = df[mapping['invoice_no']].apply(get_normalized_inv_for_matching)
     result['invoice_no_raw'] = df[mapping['invoice_no']].astype(str).str.strip()
@@ -148,15 +148,15 @@ def reconcile(pr_df, gstr_df, amount_tolerance=2.0, fuzzy_threshold=88):
         gstr_group = remaining_gstr[remaining_gstr['gstin'] == gstin]
         if gstr_group.empty:
             continue
-        gstr_invs = gstr_group['invoice_no'].tolist()
-        gstr_idx_map = dict(zip(gstr_group['invoice_no'], gstr_group.index))
+        gstr_invs = gstr_group['invoice_no_match'].tolist()
+        gstr_idx_map = dict(zip(gstr_group['invoice_no_match'], gstr_group.index))
         
         used_gstr = set()
         for pr_idx, row in pr_group.iterrows():
-            match = process.extractOne(row['invoice_no'], [i for i in gstr_invs if i not in used_gstr], scorer=fuzz.ratio)
+            match = process.extractOne(row['invoice_no_match'], [i for i in gstr_invs if i not in used_gstr], scorer=fuzz.ratio)
             if match and match[1] >= fuzzy_threshold:
                 gstr_idx = gstr_idx_map[match[0]]
-                fuzzy_matches.append((pr_idx, gstr_idx, match[1], 'Fuzzy'))
+                fuzzy_matches.append((pr_idx, gstr_idx, match[1], 'Fuzzy / Normalized'))
                 used_gstr.add(match[0])
 
     matched_pr_idxs = set()
@@ -174,7 +174,7 @@ def reconcile(pr_df, gstr_df, amount_tolerance=2.0, fuzzy_threshold=88):
     remaining_pr = pr[~pr.index.isin(matched_pr_idxs)].copy()
     remaining_gstr = gstr[~gstr.index.isin(matched_gstr_idxs)].copy()
 
-    # Level 3: Near Match
+    # Level 3: Near Match (Substring match)
     near_matches = []
     for pr_idx, pr_row in remaining_pr.iterrows():
         gstr_subset = remaining_gstr[remaining_gstr['gstin'] == pr_row['gstin']]
@@ -218,6 +218,26 @@ def reconcile(pr_df, gstr_df, amount_tolerance=2.0, fuzzy_threshold=88):
                 matched_gstr_idxs.add(gstr_idx)
                 break
 
+    for pr_idx, _ in amount_fallback_matches:
+        matched_pr_idxs.add(pr_idx)
+
+    remaining_pr = pr[~pr.index.isin(matched_pr_idxs)].copy()
+    remaining_gstr = gstr[~gstr.index.isin(matched_gstr_idxs)].copy()
+
+    # Level 5: GSTIN Mismatch Check (Same Invoice No + Same Amount, but Different GSTIN)
+    gstin_mismatch_matches = []
+    for pr_idx, pr_row in remaining_pr.iterrows():
+        match_subset = remaining_gstr[
+            (remaining_gstr['invoice_no_match'] == pr_row['invoice_no_match']) &
+            (abs(remaining_gstr['taxable'] - pr_row['taxable']) <= amount_tolerance) &
+            (abs(remaining_gstr['total_tax'] - pr_row['total_tax']) <= amount_tolerance)
+        ]
+        if not match_subset.empty:
+            gstr_idx = match_subset.index[0]
+            if gstr_idx not in matched_gstr_idxs:
+                gstin_mismatch_matches.append((pr_idx, gstr_idx))
+                matched_gstr_idxs.add(gstr_idx)
+
     matched_rows = []
     
     # 1. Exact Matches
@@ -230,19 +250,27 @@ def reconcile(pr_df, gstr_df, amount_tolerance=2.0, fuzzy_threshold=88):
         date_ok = check_date_match(pr_row['invoice_date'], gstr_row['invoice_date'])
         
         if tax_diff <= amount_tolerance and taxable_diff <= amount_tolerance:
-            status = "Fully Matched" if date_ok else "Date Mismatch"
+            status = "Exact Match" if date_ok else "Date Mismatch"
         else:
             status = "Value Mismatch"
         
         matched_rows.append({
-            'Status': status, 'Match Type': 'Exact', 'GSTIN': pr_row['gstin'],
-            'Invoice Date (Books)': pr_row['invoice_date'], 'Invoice Date (2B)': gstr_row['invoice_date'],
-            'Invoice No (Books)': pr_row['invoice_no_raw'], 'Invoice No (2B)': gstr_row['invoice_no_raw'],
-            'Taxable (Books)': pr_row['taxable'], 'Taxable (2B)': gstr_row['taxable'],
+            'Invoice Date (Books)': pr_row['invoice_date'],
+            'Invoice Date (2B)': gstr_row['invoice_date'],
+            'Status': status,
+            'Match Type': 'Exact',
+            'GSTIN (Books)': pr_row['gstin'],
+            'GSTIN (2B)': gstr_row['gstin'],
+            'Party Name': pr_row['party_name'] if pr_row['party_name'] else gstr_row['party_name'],
+            'Invoice No (Books)': pr_row['invoice_no_raw'],
+            'Invoice No (2B)': gstr_row['invoice_no_raw'],
+            'Taxable (Books)': pr_row['taxable'],
+            'Taxable (2B)': gstr_row['taxable'],
             'Tax Diff': round(pr_row['total_tax'] - gstr_row['total_tax'], 2),
             'IGST (Books)': pr_row['igst'], 'IGST (2B)': gstr_row['igst'],
             'CGST (Books)': pr_row['cgst'], 'CGST (2B)': gstr_row['cgst'],
-            'SGST (Books)': pr_row['sgst'], 'SGST (2B)': gstr_row['sgst'], 'Fuzzy Score': 100
+            'SGST (Books)': pr_row['sgst'], 'SGST (2B)': gstr_row['sgst'],
+            'Fuzzy Score': 100
         })
     
     # 2. Fuzzy Matches
@@ -255,19 +283,27 @@ def reconcile(pr_df, gstr_df, amount_tolerance=2.0, fuzzy_threshold=88):
         date_ok = check_date_match(pr_row['invoice_date'], gstr_row['invoice_date'])
         
         if tax_diff <= amount_tolerance and taxable_diff <= amount_tolerance:
-            status = "Fully Matched (Fuzzy)" if date_ok else "Date Mismatch (Fuzzy)"
+            status = "Exact Match" if date_ok else "Date Mismatch"
         else:
-            status = "Value Mismatch (Fuzzy)"
+            status = "Value Mismatch"
         
         matched_rows.append({
-            'Status': status, 'Match Type': m_type, 'GSTIN': pr_row['gstin'],
-            'Invoice Date (Books)': pr_row['invoice_date'], 'Invoice Date (2B)': gstr_row['invoice_date'],
-            'Invoice No (Books)': pr_row['invoice_no_raw'], 'Invoice No (2B)': gstr_row['invoice_no_raw'],
-            'Taxable (Books)': pr_row['taxable'], 'Taxable (2B)': gstr_row['taxable'],
+            'Invoice Date (Books)': pr_row['invoice_date'],
+            'Invoice Date (2B)': gstr_row['invoice_date'],
+            'Status': status,
+            'Match Type': m_type,
+            'GSTIN (Books)': pr_row['gstin'],
+            'GSTIN (2B)': gstr_row['gstin'],
+            'Party Name': pr_row['party_name'] if pr_row['party_name'] else gstr_row['party_name'],
+            'Invoice No (Books)': pr_row['invoice_no_raw'],
+            'Invoice No (2B)': gstr_row['invoice_no_raw'],
+            'Taxable (Books)': pr_row['taxable'],
+            'Taxable (2B)': gstr_row['taxable'],
             'Tax Diff': round(pr_row['total_tax'] - gstr_row['total_tax'], 2),
             'IGST (Books)': pr_row['igst'], 'IGST (2B)': gstr_row['igst'],
             'CGST (Books)': pr_row['cgst'], 'CGST (2B)': gstr_row['cgst'],
-            'SGST (Books)': pr_row['sgst'], 'SGST (2B)': gstr_row['sgst'], 'Fuzzy Score': score
+            'SGST (Books)': pr_row['sgst'], 'SGST (2B)': gstr_row['sgst'],
+            'Fuzzy Score': score
         })
 
     # 3. Near Matches
@@ -275,14 +311,22 @@ def reconcile(pr_df, gstr_df, amount_tolerance=2.0, fuzzy_threshold=88):
         pr_row = pr.loc[pr_idx]
         gstr_row = gstr.loc[gstr_idx]
         matched_rows.append({
-            'Status': 'Matched (Invoice No needs correction)', 'Match Type': 'Near Match', 'GSTIN': pr_row['gstin'],
-            'Invoice Date (Books)': pr_row['invoice_date'], 'Invoice Date (2B)': gstr_row['invoice_date'],
-            'Invoice No (Books)': pr_row['invoice_no_raw'], 'Invoice No (2B)': gstr_row['invoice_no_raw'],
-            'Taxable (Books)': pr_row['taxable'], 'Taxable (2B)': gstr_row['taxable'],
+            'Invoice Date (Books)': pr_row['invoice_date'],
+            'Invoice Date (2B)': gstr_row['invoice_date'],
+            'Status': 'Invoice Correction Needed',
+            'Match Type': 'Near Match',
+            'GSTIN (Books)': pr_row['gstin'],
+            'GSTIN (2B)': gstr_row['gstin'],
+            'Party Name': pr_row['party_name'] if pr_row['party_name'] else gstr_row['party_name'],
+            'Invoice No (Books)': pr_row['invoice_no_raw'],
+            'Invoice No (2B)': gstr_row['invoice_no_raw'],
+            'Taxable (Books)': pr_row['taxable'],
+            'Taxable (2B)': gstr_row['taxable'],
             'Tax Diff': round(pr_row['total_tax'] - gstr_row['total_tax'], 2),
             'IGST (Books)': pr_row['igst'], 'IGST (2B)': gstr_row['igst'],
             'CGST (Books)': pr_row['cgst'], 'CGST (2B)': gstr_row['cgst'],
-            'SGST (Books)': pr_row['sgst'], 'SGST (2B)': gstr_row['sgst'], 'Fuzzy Score': 95
+            'SGST (Books)': pr_row['sgst'], 'SGST (2B)': gstr_row['sgst'],
+            'Fuzzy Score': 95
         })
 
     # 4. Amount Fallback Matches
@@ -290,14 +334,45 @@ def reconcile(pr_df, gstr_df, amount_tolerance=2.0, fuzzy_threshold=88):
         pr_row = pr.loc[pr_idx]
         gstr_row = gstr.loc[gstr_idx]
         matched_rows.append({
-            'Status': 'Matched (Invoice No Difference / Amount Match)', 'Match Type': 'Amount Fallback', 'GSTIN': pr_row['gstin'],
-            'Invoice Date (Books)': pr_row['invoice_date'], 'Invoice Date (2B)': gstr_row['invoice_date'],
-            'Invoice No (Books)': pr_row['invoice_no_raw'], 'Invoice No (2B)': gstr_row['invoice_no_raw'],
-            'Taxable (Books)': pr_row['taxable'], 'Taxable (2B)': gstr_row['taxable'],
+            'Invoice Date (Books)': pr_row['invoice_date'],
+            'Invoice Date (2B)': gstr_row['invoice_date'],
+            'Status': 'Invoice Correction Needed',
+            'Match Type': 'Amount Fallback',
+            'GSTIN (Books)': pr_row['gstin'],
+            'GSTIN (2B)': gstr_row['gstin'],
+            'Party Name': pr_row['party_name'] if pr_row['party_name'] else gstr_row['party_name'],
+            'Invoice No (Books)': pr_row['invoice_no_raw'],
+            'Invoice No (2B)': gstr_row['invoice_no_raw'],
+            'Taxable (Books)': pr_row['taxable'],
+            'Taxable (2B)': gstr_row['taxable'],
             'Tax Diff': round(pr_row['total_tax'] - gstr_row['total_tax'], 2),
             'IGST (Books)': pr_row['igst'], 'IGST (2B)': gstr_row['igst'],
             'CGST (Books)': pr_row['cgst'], 'CGST (2B)': gstr_row['cgst'],
-            'SGST (Books)': pr_row['sgst'], 'SGST (2B)': gstr_row['sgst'], 'Fuzzy Score': 90
+            'SGST (Books)': pr_row['sgst'], 'SGST (2B)': gstr_row['sgst'],
+            'Fuzzy Score': 90
+        })
+
+    # 5. GSTIN Mismatch Matches
+    for pr_idx, gstr_idx in gstin_mismatch_matches:
+        pr_row = pr.loc[pr_idx]
+        gstr_row = gstr.loc[gstr_idx]
+        matched_rows.append({
+            'Invoice Date (Books)': pr_row['invoice_date'],
+            'Invoice Date (2B)': gstr_row['invoice_date'],
+            'Status': 'GSTIN Mismatch',
+            'Match Type': 'GSTIN Mismatch',
+            'GSTIN (Books)': pr_row['gstin'],
+            'GSTIN (2B)': gstr_row['gstin'],
+            'Party Name': pr_row['party_name'] if pr_row['party_name'] else gstr_row['party_name'],
+            'Invoice No (Books)': pr_row['invoice_no_raw'],
+            'Invoice No (2B)': gstr_row['invoice_no_raw'],
+            'Taxable (Books)': pr_row['taxable'],
+            'Taxable (2B)': gstr_row['taxable'],
+            'Tax Diff': round(pr_row['total_tax'] - gstr_row['total_tax'], 2),
+            'IGST (Books)': pr_row['igst'], 'IGST (2B)': gstr_row['igst'],
+            'CGST (Books)': pr_row['cgst'], 'CGST (2B)': gstr_row['cgst'],
+            'SGST (Books)': pr_row['sgst'], 'SGST (2B)': gstr_row['sgst'],
+            'Fuzzy Score': 90
         })
     
     matched_df = pd.DataFrame(matched_rows)
@@ -311,14 +386,18 @@ def reconcile(pr_df, gstr_df, amount_tolerance=2.0, fuzzy_threshold=88):
         matched_pr_orig.add(pr_idx)
     for pr_idx, _ in amount_fallback_matches:
         matched_pr_orig.add(pr_idx)
+    for pr_idx, _ in gstin_mismatch_matches:
+        matched_pr_orig.add(pr_idx)
     
+    # Missing in 2B (Date first, then GSTIN, Party Name...)
     missing_in_2b = pr[~pr.index.isin(matched_pr_orig)].copy()
-    missing_in_2b = missing_in_2b[['gstin', 'invoice_date', 'invoice_no_raw', 'taxable', 'igst', 'cgst', 'sgst', 'total_tax']]
-    missing_in_2b.columns = ['GSTIN', 'Invoice Date', 'Invoice No', 'Taxable', 'IGST', 'CGST', 'SGST', 'Total Tax']
+    missing_in_2b = missing_in_2b[['invoice_date', 'gstin', 'party_name', 'invoice_no_raw', 'taxable', 'igst', 'cgst', 'sgst', 'total_tax']]
+    missing_in_2b.columns = ['Invoice Date', 'GSTIN', 'Party Name', 'Invoice No', 'Taxable', 'IGST', 'CGST', 'SGST', 'Total Tax']
     
+    # Extra in 2B (Date first, then GSTIN, Party Name...)
     extra_in_2b = gstr[~gstr.index.isin(matched_gstr_idxs)].copy()
-    extra_in_2b = extra_in_2b[['gstin', 'invoice_date', 'invoice_no_raw', 'taxable', 'igst', 'cgst', 'sgst', 'total_tax']]
-    extra_in_2b.columns = ['GSTIN', 'Invoice Date', 'Invoice No', 'Taxable', 'IGST', 'CGST', 'SGST', 'Total Tax']
+    extra_in_2b = extra_in_2b[['invoice_date', 'gstin', 'party_name', 'invoice_no_raw', 'taxable', 'igst', 'cgst', 'sgst', 'total_tax']]
+    extra_in_2b.columns = ['Invoice Date', 'GSTIN', 'Party Name', 'Invoice No', 'Taxable', 'IGST', 'CGST', 'SGST', 'Total Tax']
     
     return matched_df, missing_in_2b, extra_in_2b
 
@@ -350,16 +429,13 @@ def to_excel_download(matched, missing, extra):
     output = BytesIO()
     
     if not matched.empty:
-        fully = matched[matched['Status'].str.contains('Fully Matched', na=False)].copy()
-        date_mismatch = matched[matched['Status'].str.contains('Date Mismatch', na=False)].copy()
-        near_match = matched[matched['Status'].str.contains('needs correction|Difference / Amount Match', na=False)].copy()
-        mismatch_df_sub = matched[matched['Status'].str.contains('Value Mismatch', na=False)].copy()
-        mismatch_df_sub = enrich_mismatch(mismatch_df_sub)
+        matched_sorted = matched.sort_values(by=['Status', 'Invoice Date (Books)']).copy()
+        mismatch_sub = matched_sorted[matched_sorted['Status'] == 'Value Mismatch'].copy()
+        mismatch_sub = enrich_mismatch(mismatch_sub)
+        other_matched = matched_sorted[matched_sorted['Status'] != 'Value Mismatch'].copy()
+        final_matched_sheet = pd.concat([other_matched, mismatch_sub], ignore_index=True)
     else:
-        fully = pd.DataFrame()
-        date_mismatch = pd.DataFrame()
-        near_match = pd.DataFrame()
-        mismatch_df_sub = pd.DataFrame()
+        final_matched_sheet = pd.DataFrame()
     
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         workbook = writer.book
@@ -368,14 +444,43 @@ def to_excel_download(matched, missing, extra):
             'bold': True, 'bg_color': '#1E3A5F', 'font_color': 'white',
             'border': 1, 'align': 'center', 'valign': 'vcenter'
         })
-        green_fmt = workbook.add_format({'bg_color': '#C6EFCE', 'border': 1})
-        blue_fmt = workbook.add_format({'bg_color': '#BDD7EE', 'border': 1})
-        brown_fmt = workbook.add_format({'bg_color': '#D2B48C', 'border': 1})
-        yellow_fmt = workbook.add_format({'bg_color': '#FFEB9C', 'border': 1})
-        red_fmt = workbook.add_format({'bg_color': '#FFC7CE', 'border': 1})
+        yellow_fmt = workbook.add_format({'bg_color': '#FFEB9C', 'border': 1}) # Yellow for Value Mismatch
+        red_fmt = workbook.add_format({'bg_color': '#FFC7CE', 'border': 1})    # Light Red for Missing & GSTIN Mismatch
         normal_fmt = workbook.add_format({'border': 1})
         money_fmt = workbook.add_format({'num_format': '#,##0.00', 'border': 1})
         
+        # Write Matched Invoices Sheet with conditional row coloring
+        if not final_matched_sheet.empty:
+            df_m = final_matched_sheet
+            df_m.to_excel(writer, sheet_name='Matched Invoices', index=False)
+            ws = writer.sheets['Matched Invoices']
+            
+            for col_num, value in enumerate(df_m.columns.values):
+                ws.write(0, col_num, value, header_fmt)
+            
+            for row_num in range(1, len(df_m) + 1):
+                row_status = df_m.iloc[row_num-1]['Status']
+                if row_status == 'Value Mismatch':
+                    row_fmt = yellow_fmt
+                elif row_status == 'GSTIN Mismatch':
+                    row_fmt = red_fmt
+                else:
+                    row_fmt = normal_fmt
+                
+                for col_num in range(len(df_m.columns)):
+                    val = df_m.iloc[row_num-1, col_num]
+                    if any(x in str(df_m.columns[col_num]).lower() for x in ['taxable', 'igst', 'cgst', 'sgst', 'diff', 'tax']):
+                        try:
+                            ws.write_number(row_num, col_num, float(val) if pd.notna(val) else 0, money_fmt)
+                            continue
+                        except:
+                            pass
+                    ws.write(row_num, col_num, val if pd.notna(val) else '', row_fmt)
+            
+            for i, col in enumerate(df_m.columns):
+                max_len = max(len(str(col)), df_m[col].astype(str).str.len().max() if len(df_m) > 0 else 10)
+                ws.set_column(i, i, min(max_len + 2, 35))
+
         def write_sheet(df, sheet_name, row_format=None):
             if df.empty:
                 return
@@ -401,31 +506,35 @@ def to_excel_download(matched, missing, extra):
                 max_len = max(len(str(col)), df[col].astype(str).str.len().max() if len(df) > 0 else 10)
                 ws.set_column(i, i, min(max_len + 2, 35))
         
-        write_sheet(fully, 'Fully Matched', green_fmt)
-        write_sheet(date_mismatch, 'Date Mismatch', blue_fmt)
-        write_sheet(near_match, 'Invoice Correction Needed', brown_fmt)
-        write_sheet(mismatch_df_sub, 'Value Mismatch', yellow_fmt)
         write_sheet(missing, 'Missing in 2B', red_fmt)
         write_sheet(extra, 'Extra in 2B', None)
         
+        exact_cnt = len(matched[matched['Status'] == 'Exact Match']) if not matched.empty else 0
+        date_mis_cnt = len(matched[matched['Status'] == 'Date Mismatch']) if not matched.empty else 0
+        corr_cnt = len(matched[matched['Status'] == 'Invoice Correction Needed']) if not matched.empty else 0
+        val_mis_cnt = len(matched[matched['Status'] == 'Value Mismatch']) if not matched.empty else 0
+        gstin_mis_cnt = len(matched[matched['Status'] == 'GSTIN Mismatch']) if not matched.empty else 0
+        
         summary_data = {
             'Category': [
-                'Fully Matched',
+                'Exact Match',
                 'Date Mismatch',
-                'Invoice Correction Needed (Near/Amount Match)',
+                'Invoice Correction Needed',
                 'Value Mismatch',
+                'GSTIN Mismatch',
                 'Missing in GSTR-2B',
                 'Extra in GSTR-2B',
                 'Total Invoices Processed (Books side)'
             ],
             'Count': [
-                len(fully),
-                len(date_mismatch),
-                len(near_match),
-                len(mismatch_df_sub),
+                exact_cnt,
+                date_mis_cnt,
+                corr_cnt,
+                val_mis_cnt,
+                gstin_mis_cnt,
                 len(missing),
                 len(extra),
-                len(fully) + len(date_mismatch) + len(near_match) + len(mismatch_df_sub) + len(missing)
+                exact_cnt + date_mis_cnt + corr_cnt + val_mis_cnt + gstin_mis_cnt + len(missing)
             ]
         }
         summary_df = pd.DataFrame(summary_data)
@@ -457,10 +566,12 @@ def try_parse_gstr2b_json(file):
         b2b = docdata.get('b2b', [])
         for supplier in b2b:
             gstin = supplier.get('ctin', '')
+            trade_name = supplier.get('trdnm', '') or supplier.get('cname', '')
             invs = supplier.get('inv', [])
             for inv in invs:
                 rows.append({
                     'GSTIN of Supplier': gstin,
+                    'Party Name': trade_name,
                     'Invoice Number': inv.get('inum', ''),
                     'Invoice Date': inv.get('dt', ''),
                     'Taxable Value': inv.get('val', 0),
@@ -478,7 +589,7 @@ def try_parse_gstr2b_json(file):
 # Sidebar
 # --------------------------
 with st.sidebar:
-    st.markdown("## 🤖 Jarvis GST Advanced")
+    st.markdown("## 🤖 Jarvis GST Ultimate")
     st.caption("Local Reconciliation Platform")
     st.markdown("---")
     
@@ -494,7 +605,7 @@ with st.sidebar:
 # --------------------------
 # Main UI
 # --------------------------
-st.markdown('<div class="main-header">🤖 Jarvis GST Advanced</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-header">🤖 Jarvis GST Ultimate</div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-header">Purchase Register ↔ GSTR-2B Reconciliation Platform</div>', unsafe_allow_html=True)
 
 tab1, tab2, tab3 = st.tabs(["🔄 Reconcile", "📖 Guide", "ℹ️ About"])
@@ -556,6 +667,7 @@ with tab1:
         with map_col1:
             st.markdown("**Purchase Register columns**")
             pr_gstin = st.selectbox("Supplier GSTIN", pr_cols, index=pr_cols.index(auto_select(pr_cols, ['gstin', 'supplier gstin', 'ctin'])) if auto_select(pr_cols, ['gstin', 'supplier gstin', 'ctin']) in pr_cols else 0)
+            pr_party = st.selectbox("Party / Supplier Name", ['-- None --'] + pr_cols, index=(['-- None --'] + pr_cols).index(auto_select(pr_cols, ['party', 'name', 'supplier', 'trade', 'customer'])) if auto_select(pr_cols, ['party', 'name', 'supplier', 'trade', 'customer']) else 0)
             pr_inv = st.selectbox("Invoice Number", pr_cols, index=pr_cols.index(auto_select(pr_cols, ['invoice', 'inv no', 'bill no'])) if auto_select(pr_cols, ['invoice', 'inv no', 'bill no']) in pr_cols else 0)
             pr_date = st.selectbox("Invoice Date", pr_cols, index=pr_cols.index(auto_select(pr_cols, ['date', 'dt', 'inv date'])) if auto_select(pr_cols, ['date', 'dt', 'inv date']) in pr_cols else 0)
             pr_taxable = st.selectbox("Taxable Value", pr_cols, index=pr_cols.index(auto_select(pr_cols, ['taxable', 'taxable value'])) if auto_select(pr_cols, ['taxable', 'taxable value']) in pr_cols else 0)
@@ -566,6 +678,7 @@ with tab1:
         with map_col2:
             st.markdown("**GSTR-2B columns**")
             g_gstin = st.selectbox("Supplier GSTIN", gstr_cols, key="g_gstin", index=gstr_cols.index(auto_select(gstr_cols, ['gstin', 'supplier gstin', 'ctin'])) if auto_select(gstr_cols, ['gstin', 'supplier gstin', 'ctin']) in gstr_cols else 0)
+            g_party = st.selectbox("Party / Supplier Name", ['-- None --'] + gstr_cols, key="g_party", index=(['-- None --'] + gstr_cols).index(auto_select(gstr_cols, ['party', 'name', 'supplier', 'trade', 'trdnm', 'cname'])) if auto_select(gstr_cols, ['party', 'name', 'supplier', 'trade', 'trdnm', 'cname']) else 0)
             g_inv = st.selectbox("Invoice Number", gstr_cols, key="g_inv", index=gstr_cols.index(auto_select(gstr_cols, ['invoice', 'inv no', 'inum'])) if auto_select(gstr_cols, ['invoice', 'inv no', 'inum']) in gstr_cols else 0)
             g_date = st.selectbox("Invoice Date", gstr_cols, key="g_date", index=gstr_cols.index(auto_select(gstr_cols, ['date', 'dt', 'inv date'])) if auto_select(gstr_cols, ['date', 'dt', 'inv date']) in gstr_cols else 0)
             g_taxable = st.selectbox("Taxable Value", gstr_cols, key="g_taxable", index=gstr_cols.index(auto_select(gstr_cols, ['taxable', 'val'])) if auto_select(gstr_cols, ['taxable', 'val']) in gstr_cols else 0)
@@ -574,9 +687,11 @@ with tab1:
             g_sgst = st.selectbox("SGST / UTGST", ['-- None --'] + gstr_cols, key="g_sgst", index=(['-- None --'] + gstr_cols).index(auto_select(gstr_cols, ['sgst', 'samt'])) if auto_select(gstr_cols, ['sgst', 'samt']) else 0)
         
         if st.button("🚀 Run Advanced Reconciliation", type="primary", use_container_width=True):
-            with st.spinner("Jarvis is running matching with float & space fix..."):
+            with st.spinner("Jarvis is running ultimate reconciliation..."):
                 pr_map = {
-                    'gstin': pr_gstin, 'invoice_no': pr_inv,
+                    'gstin': pr_gstin,
+                    'party_name': pr_party if pr_party != '-- None --' else None,
+                    'invoice_no': pr_inv,
                     'invoice_date': pr_date if pr_date != '-- None --' else None,
                     'taxable': pr_taxable,
                     'igst': pr_igst if pr_igst != '-- None --' else None,
@@ -584,7 +699,9 @@ with tab1:
                     'sgst': pr_sgst if pr_sgst != '-- None --' else None,
                 }
                 g_map = {
-                    'gstin': g_gstin, 'invoice_no': g_inv,
+                    'gstin': g_gstin,
+                    'party_name': g_party if g_party != '-- None --' else None,
+                    'invoice_no': g_inv,
                     'invoice_date': g_date if g_date != '-- None --' else None,
                     'taxable': g_taxable,
                     'igst': g_igst if g_igst != '-- None --' else None,
@@ -615,82 +732,64 @@ with tab1:
             extra = st.session_state['extra']
             
             st.markdown("---")
-            st.subheader("📊 Advanced Reconciliation Summary")
+            st.subheader("📊 Reconciliation Summary Dashboard")
             
-            fully = len(matched[matched['Status'].str.contains('Fully Matched', na=False)]) if not matched.empty else 0
-            date_mismatch_cnt = len(matched[matched['Status'].str.contains('Date Mismatch', na=False)]) if not matched.empty else 0
-            near_match_count = len(matched[matched['Status'].str.contains('needs correction|Difference / Amount Match', na=False)]) if not matched.empty else 0
-            mismatch_count = len(matched[matched['Status'].str.contains('Value Mismatch', na=False)]) if not matched.empty else 0
+            exact_cnt = len(matched[matched['Status'] == 'Exact Match']) if not matched.empty else 0
+            date_mis_cnt = len(matched[matched['Status'] == 'Date Mismatch']) if not matched.empty else 0
+            corr_cnt = len(matched[matched['Status'] == 'Invoice Correction Needed']) if not matched.empty else 0
+            val_mis_cnt = len(matched[matched['Status'] == 'Value Mismatch']) if not matched.empty else 0
+            gstin_mis_cnt = len(matched[matched['Status'] == 'GSTIN Mismatch']) if not matched.empty else 0
             
-            m1, m2, m3, m4, m5, m6 = st.columns(6)
-            m1.metric("✅ Fully Matched", fully)
-            m2.metric("📅 Date Mismatch", date_mismatch_cnt)
-            m3.metric("🟤 Invoice Correction", near_match_count)
-            m4.metric("⚠️ Value Mismatch", mismatch_count)
-            m5.metric("🔴 Missing in 2B", len(missing))
-            m6.metric("🟡 Extra in 2B", len(extra))
+            m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
+            m1.metric("✅ Exact", exact_cnt)
+            m2.metric("📅 Date", date_mis_cnt)
+            m3.metric("🟤 Correction", corr_cnt)
+            m4.metric("⚠️ Value", val_mis_cnt)
+            m5.metric("🔄 GSTIN Mismatch", gstin_mis_cnt)
+            m6.metric("🔴 Missing", len(missing))
+            m7.metric("🟡 Extra", len(extra))
             
             excel_bytes = to_excel_download(matched, missing, extra)
             st.download_button(
-                label="📥 Download Advanced Report",
+                label="📥 Download Ultimate Excel Report",
                 data=excel_bytes,
                 file_name=f"Jarvis_GST_Reconciliation_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True
             )
             
-            r1, r2, r3, r4, r5, r6 = st.tabs(["✅ Fully Matched", "📅 Date Mismatch", "🟤 Invoice Correction Needed", "⚠️ Value Mismatch", "Missing in 2B", "Extra in 2B"])
+            r1, r2, r3 = st.tabs(["🔗 Matched Invoices", "🔴 Missing in 2B", "🟡 Extra in 2B"])
             
             with r1:
-                fully_df = matched[matched['Status'].str.contains('Fully Matched', na=False)] if not matched.empty else pd.DataFrame()
-                if not fully_df.empty:
-                    st.dataframe(fully_df, use_container_width=True, height=400)
+                if not matched.empty:
+                    st.dataframe(matched, use_container_width=True, height=400)
                 else:
-                    st.info("No fully matched invoices.")
+                    st.info("No matched invoices found.")
 
             with r2:
-                date_df = matched[matched['Status'].str.contains('Date Mismatch', na=False)] if not matched.empty else pd.DataFrame()
-                if not date_df.empty:
-                    st.dataframe(date_df, use_container_width=True, height=400)
-                else:
-                    st.success("No date mismatches found.")
-            
-            with r3:
-                near_df = matched[matched['Status'].str.contains('needs correction|Difference / Amount Match', na=False)] if not matched.empty else pd.DataFrame()
-                if not near_df.empty:
-                    st.dataframe(near_df, use_container_width=True, height=400)
-                else:
-                    st.success("No invoice corrections needed.")
-
-            with r4:
-                mismatch_df_tab = matched[matched['Status'].str.contains('Value Mismatch', na=False)] if not matched.empty else pd.DataFrame()
-                if not mismatch_df_tab.empty:
-                    st.dataframe(enrich_mismatch(mismatch_df_tab), use_container_width=True, height=400)
-                else:
-                    st.success("No value mismatches.")
-            
-            with r5:
                 if not missing.empty:
+                    st.warning("These invoices are in your books but missing in GSTR-2B.")
                     st.dataframe(missing, use_container_width=True, height=400)
                 else:
                     st.success("No missing invoices.")
             
-            with r6:
+            with r3:
                 if not extra.empty:
+                    st.info("These appear in GSTR-2B but are not found in your books.")
                     st.dataframe(extra, use_container_width=True, height=400)
                 else:
                     st.success("No extra invoices in 2B.")
 
 with tab2:
     st.markdown("""
-    ### Matching Rules
-    1. **Exact Match**: GSTIN + Invoice Number same.
-    2. **Fuzzy & Float Fix**: Handles Excel number formatting (.0 issue) and spacing automatically.
-    3. **Smart Fallback**: Amount-based safety net.
+    ### Ultimate Reconciliation Guide
+    1. **Matched Invoices Sheet**: Exact Match, Date Mismatch, Invoice Correction, Value Mismatch aur GSTIN Mismatch sab ek hi sheet par hain. Value Mismatch rows yellow highlight hongi, aur GSTIN Mismatch rows halka red highlight hongi.
+    2. **Missing in 2B Sheet**: Halka red highlight hoga aur party name ke sath sabse pehle date hogi.
+    3. **Date First Column**: Sabhi sheets mein Date sabse pehla column hai.
     """)
 
 with tab3:
-    st.markdown("### About Jarvis GST Advanced")
+    st.markdown("### About Jarvis GST Ultimate")
 
 st.markdown("---")
-st.caption("Jarvis GST Advanced • Local Reconciliation Platform")
+st.caption("Jarvis GST Ultimate • Local Reconciliation Platform")
